@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+</head>
+<body>
+
+    <div>Message:</div>
+    <div><textarea name="msg" id="msg" cols="50" rows="10"></textarea></div>
+    <div><button onclick="send()">Send</button></div>
+    
+    <script src="nacl-fast.min.js"></script>
+    <script src="nacl-util.min.js"></script>
+    <script src="axios.min.js"></script>
+    <script>
+        const newNonce = () => nacl.randomBytes(nacl.box.nonceLength);
+        const generateKeyPair = () => nacl.box.keyPair();
+
+        const encrypt = (
+            secretOrSharedKey,
+            json,
+            key
+        ) => {
+            const nonce = newNonce();
+            const messageUint8 = nacl.util.decodeUTF8(JSON.stringify(json));
+            const encrypted = key
+                ? nacl.box(messageUint8, nonce, key, secretOrSharedKey)
+                : nacl.box.after(messageUint8, nonce, secretOrSharedKey);
+
+            const fullMessage = new Uint8Array(encrypted.length);
+            fullMessage.set(encrypted);
+
+            const base64FullMessage = nacl.util.encodeBase64(fullMessage);
+            return {data: base64FullMessage, nonce: nacl.util.encodeBase64(nonce)};
+        };
+
+        const decrypt = (
+            secretOrSharedKey,
+            messageBase64,
+            nonceBase64,
+            key
+        ) => {
+            const nonce = nacl.util.decodeBase64(nonceBase64);
+            const message = nacl.util.decodeBase64(messageBase64)
+
+            const decrypted = key
+                ? nacl.box.open(message, nonce, key, secretOrSharedKey)
+                : nacl.box.open.after(message, nonce, secretOrSharedKey);
+
+            if (!decrypted) {
+                throw new Error('Could not decrypt message');
+            }
+
+            const base64DecryptedMessage = nacl.util.encodeUTF8(decrypted);
+            return JSON.parse(base64DecryptedMessage);
+        };
+
+        function send() {
+            if(!localStorage.getItem('server_public_key')) {
+                askServerPublicKeyBeforeSendData();
+            }
+            else {
+                sendDataToServer();
+            }
+        }
+
+        function clientKeyPair() {
+            let keypair = localStorage.getItem('keypair');
+            if(!keypair) {
+                keypair = generateKeyPair();
+                keypair = {
+                    publicKey: nacl.util.encodeBase64(keypair.publicKey),
+                    secretKey: nacl.util.encodeBase64(keypair.secretKey),
+                }
+                localStorage.setItem('keypair', JSON.stringify(keypair))
+            }
+            else {
+                keypair = JSON.parse(keypair);
+            }
+            return keypair;
+        }
+
+        function sendClientKeyToServerBeforeSendData() {
+            axios.post('proses.php?act=client_public_key', {'client_public_key':clientKeyPair().publicKey})
+                .then(() => {
+                    sendDataToServer()
+                })
+        }
+
+        function askServerPublicKeyBeforeSendData() {
+            axios.get('proses.php?act=ask_public_key')
+                .then(res => {
+                    localStorage.setItem('server_public_key', res.data.server_public_key);
+
+                    if(res.data.ask_client_key) {
+                        sendClientKeyToServerBeforeSendData()
+                    }
+                    else {
+                        sendDataToServer();
+                    }
+                });
+        }
+
+        function sendDataToServer() {
+            let server_public_key = localStorage.getItem('server_public_key');
+            console.log(nacl.util.decodeBase64(server_public_key), nacl.util.decodeBase64(clientKeyPair().secretKey));
+            // let key = nacl.box.before(nacl.util.decodeBase64(server_public_key), nacl.util.decodeBase64(clientKeyPair().secretKey))
+            let data = {message: document.getElementById('msg').value};
+            let encrypted = encrypt(nacl.util.decodeBase64(clientKeyPair().secretKey), data, nacl.util.decodeBase64(server_public_key));
+            axios.post('proses.php?act=data', encrypted)
+                .then(res => {
+                    let encrypted = res.data.data;
+                    let nonce = res.data.nonce;
+                    let realData = decrypt(nacl.util.decodeBase64(clientKeyPair().secretKey), encrypted, nonce, nacl.util.decodeBase64(server_public_key));
+                    console.log({
+                        encrypted: realData.encrypted,
+                        decrypted: atob(realData.decrypted)
+                    });
+                });
+        }
+    </script>
+</body>
+</html>
